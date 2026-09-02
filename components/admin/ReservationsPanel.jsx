@@ -1,0 +1,559 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import useSWR, { mutate as globalMutate } from 'swr';
+import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
+import {
+  Calendar, Clock, Users, Phone, Mail, MessageCircle, Search, X, Trash2,
+  ChevronLeft, ChevronRight, Sparkles, BarChart3, CalendarDays,
+  CalendarRange, StickyNote, Eye, AlertCircle,
+} from 'lucide-react';
+
+/* -------------------------------------------------------------------- */
+/* Config, chave compartilhada de cache (SWR) e helpers                  */
+/* -------------------------------------------------------------------- */
+
+export const RESERVATIONS_KEY = '/api/reservations';
+const PAGE_SIZE = 20;
+
+export const STATUS = {
+  pending:   { label: 'Pendente',   emoji: '🟡', dot: 'bg-amber-400',   text: 'text-amber-400',   bg: 'bg-amber-400/10',   border: 'border-amber-400/30' },
+  confirmed: { label: 'Confirmada', emoji: '🟢', dot: 'bg-emerald-400', text: 'text-emerald-400', bg: 'bg-emerald-400/10', border: 'border-emerald-400/30' },
+  completed: { label: 'Concluída',  emoji: '🔵', dot: 'bg-sky-400',     text: 'text-sky-400',     bg: 'bg-sky-400/10',     border: 'border-sky-400/30' },
+  cancelled: { label: 'Cancelada',  emoji: '🔴', dot: 'bg-red-400',     text: 'text-red-400',     bg: 'bg-red-400/10',     border: 'border-red-400/30' },
+};
+
+const QUICK_FILTERS = [
+  { id: 'all', label: 'Todas' },
+  { id: 'pending', label: 'Pendentes' },
+  { id: 'confirmed', label: 'Confirmadas' },
+  { id: 'completed', label: 'Concluídas' },
+  { id: 'cancelled', label: 'Canceladas' },
+  { id: 'today', label: 'Hoje' },
+  { id: 'week', label: 'Esta semana' },
+  { id: 'month', label: 'Este mês' },
+];
+
+function fetcher(token) {
+  return async (url) => {
+    const r = await fetch(url, { headers: { 'x-admin-password': token } });
+    if (!r.ok) throw new Error('Falha ao carregar reservas');
+    return r.json();
+  };
+}
+
+/** Hook compartilhado — usado pela aba do Dashboard (para o badge) e pelo painel. */
+export function useReservationsData(token) {
+  const { data, error, isLoading, mutate } = useSWR(
+    token ? RESERVATIONS_KEY : null,
+    fetcher(token),
+    { refreshInterval: 15000, revalidateOnFocus: true }
+  );
+  const items = data?.items || [];
+  const pendingCount = items.filter((r) => r.status === 'pending').length;
+  const newCount = items.filter((r) => r.seen === false).length;
+  return { items, error, isLoading, mutate, pendingCount, newCount };
+}
+
+function parseDate(d) {
+  if (!d) return null;
+  const [y, m, day] = String(d).split('-').map(Number);
+  if (!y || !m || !day) return null;
+  return new Date(y, m - 1, day);
+}
+function isSameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+function startOfWeek(d) {
+  const x = new Date(d);
+  x.setDate(x.getDate() - x.getDay());
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function isThisWeek(target, ref) {
+  const s = startOfWeek(ref);
+  const e = new Date(s);
+  e.setDate(e.getDate() + 6);
+  e.setHours(23, 59, 59, 999);
+  return target >= s && target <= e;
+}
+function isThisMonth(target, ref) {
+  return target.getFullYear() === ref.getFullYear() && target.getMonth() === ref.getMonth();
+}
+function fmtDate(d) {
+  const dt = parseDate(d);
+  if (!dt) return d || '—';
+  return dt.toLocaleDateString('pt-BR');
+}
+function fmtCreatedAt(iso) {
+  if (!iso) return '—';
+  const dt = new Date(iso);
+  if (isNaN(dt)) return '—';
+  return dt.toLocaleDateString('pt-BR') + ' às ' + dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+function onlyDigits(s) { return (s || '').replace(/\D/g, ''); }
+function whatsHref(phone) {
+  let d = onlyDigits(phone);
+  if (d.length <= 11) d = '55' + d;
+  return `https://wa.me/${d}`;
+}
+function telHref(phone) {
+  let d = onlyDigits(phone);
+  if (d.length <= 11) d = '55' + d;
+  return `tel:+${d}`;
+}
+
+/* -------------------------------------------------------------------- */
+/* Peças visuais reaproveitando o padrão glass / gold do admin           */
+/* -------------------------------------------------------------------- */
+
+function StatCard({ icon: Icon, label, value, accent }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+      className="glass rounded-2xl p-4 flex items-center gap-3"
+    >
+      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${accent}`}>
+        <Icon className="w-5 h-5" />
+      </div>
+      <div className="min-w-0">
+        <div className="font-display text-2xl font-bold text-white leading-none">{value}</div>
+        <div className="text-[11px] text-white/50 uppercase tracking-wider mt-1">{label}</div>
+      </div>
+    </motion.div>
+  );
+}
+
+function StatusSelect({ value, onChange, compact }) {
+  const s = STATUS[value] || STATUS.pending;
+  return (
+    <select
+      value={value}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => { e.stopPropagation(); onChange(e.target.value); }}
+      className={`rounded-full font-semibold border bg-black/40 focus:outline-none focus:ring-2 focus:ring-gold/30 [color-scheme:dark] ${s.text} ${s.border} ${compact ? 'text-xs px-2.5 py-1' : 'text-sm px-3 py-1.5'}`}
+    >
+      {Object.entries(STATUS).map(([k, v]) => (
+        <option key={k} value={k} className="bg-charcoal text-white">{v.emoji} {v.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function NewBadgeDot() {
+  return (
+    <span className="relative inline-flex h-2.5 w-2.5">
+      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-gold opacity-75" />
+      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-gold" />
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Drawer de detalhes                                                    */
+/* -------------------------------------------------------------------- */
+
+function ReservationDrawer({ reservation, onClose, onStatusChange, onDelete }) {
+  if (!reservation) return null;
+  const s = STATUS[reservation.status] || STATUS.pending;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+        className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
+          transition={{ type: 'spring', damping: 28, stiffness: 260 }}
+          className="absolute right-0 top-0 h-full w-full max-w-md glass overflow-y-auto"
+          style={{ borderLeft: '1px solid rgba(169,129,46,0.25)' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="p-6">
+            <div className="flex items-start justify-between mb-6">
+              <div>
+                <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${s.bg} ${s.text} mb-3`}>
+                  <span className={`w-2 h-2 rounded-full ${s.dot}`} /> {s.label}
+                </div>
+                <h3 className="font-display text-2xl font-semibold text-white">{reservation.name || 'Sem nome'}</h3>
+              </div>
+              <button onClick={onClose} className="w-9 h-9 rounded-full glass flex items-center justify-center shrink-0">
+                <X className="w-4 h-4 text-gold" />
+              </button>
+            </div>
+
+            <div className="space-y-3 mb-6">
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-black/30">
+                <Phone className="w-4 h-4 text-gold shrink-0" />
+                <span className="text-white/85 text-sm">{reservation.phone || '—'}</span>
+              </div>
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-black/30">
+                <Mail className="w-4 h-4 text-gold shrink-0" />
+                <span className="text-white/85 text-sm truncate">{reservation.email || '—'}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-black/30">
+                  <Calendar className="w-4 h-4 text-gold shrink-0" />
+                  <span className="text-white/85 text-sm">{fmtDate(reservation.date)}</span>
+                </div>
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-black/30">
+                  <Clock className="w-4 h-4 text-gold shrink-0" />
+                  <span className="text-white/85 text-sm">{reservation.time || '—'}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-black/30">
+                <Users className="w-4 h-4 text-gold shrink-0" />
+                <span className="text-white/85 text-sm">{reservation.guests || 1} pessoa(s)</span>
+              </div>
+              {reservation.message && (
+                <div className="flex items-start gap-3 p-3 rounded-xl bg-black/30">
+                  <StickyNote className="w-4 h-4 text-gold shrink-0 mt-0.5" />
+                  <span className="text-white/70 text-sm leading-relaxed">{reservation.message}</span>
+                </div>
+              )}
+              <div className="text-[11px] text-white/40 pl-1">
+                Reserva criada em {fmtCreatedAt(reservation.createdAt)}
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-xs uppercase tracking-widest text-gold mb-2">Status</label>
+              <StatusSelect value={reservation.status} onChange={(v) => onStatusChange(reservation, v)} />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 mb-6">
+              <a href={telHref(reservation.phone)} className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass hover:bg-gold/10 transition-colors">
+                <Phone className="w-4 h-4 text-gold" />
+                <span className="text-[11px] text-white/70">Ligar</span>
+              </a>
+              <a href={whatsHref(reservation.phone)} target="_blank" rel="noreferrer" className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass hover:bg-[#25D366]/10 transition-colors">
+                <MessageCircle className="w-4 h-4 text-[#25D366]" />
+                <span className="text-[11px] text-white/70">WhatsApp</span>
+              </a>
+              <a href={`mailto:${reservation.email || ''}`} className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass hover:bg-gold/10 transition-colors">
+                <Mail className="w-4 h-4 text-gold" />
+                <span className="text-[11px] text-white/70">E-mail</span>
+              </a>
+            </div>
+
+            <button
+              onClick={() => onDelete(reservation)}
+              className="w-full py-3 rounded-full glass text-red-400 text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-red-500/10 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" /> Excluir reserva
+            </button>
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Painel principal                                                      */
+/* -------------------------------------------------------------------- */
+
+export default function ReservationsPanel({ token }) {
+  const { items, error, isLoading, mutate } = useReservationsData(token);
+  const [q, setQ] = useState('');
+  const [quickFilter, setQuickFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState(null);
+
+  useEffect(() => { setPage(1); }, [q, quickFilter]);
+
+  useEffect(() => {
+    if (error) toast.error('Não foi possível carregar as reservas.');
+  }, [error]);
+
+  const now = new Date();
+
+  const stats = useMemo(() => {
+    const today = items.filter((r) => { const d = parseDate(r.date); return d && isSameDay(d, now); }).length;
+    const week = items.filter((r) => { const d = parseDate(r.date); return d && isThisWeek(d, now); }).length;
+    const month = items.filter((r) => { const d = parseDate(r.date); return d && isThisMonth(d, now); }).length;
+    const pending = items.filter((r) => r.status === 'pending').length;
+    const confirmed = items.filter((r) => r.status === 'confirmed').length;
+    return { today, week, month, pending, confirmed, total: items.length };
+  }, [items]);
+
+  const filtered = useMemo(() => {
+    let list = items.filter((r) => {
+      if (!q) return true;
+      const hay = `${r.name || ''} ${r.phone || ''} ${r.email || ''}`.toLowerCase();
+      return hay.includes(q.toLowerCase());
+    });
+    list = list.filter((r) => {
+      if (quickFilter === 'all') return true;
+      if (['pending', 'confirmed', 'completed', 'cancelled'].includes(quickFilter)) return r.status === quickFilter;
+      const d = parseDate(r.date);
+      if (!d) return false;
+      if (quickFilter === 'today') return isSameDay(d, now);
+      if (quickFilter === 'week') return isThisWeek(d, now);
+      if (quickFilter === 'month') return isThisMonth(d, now);
+      return true;
+    });
+    return [...list].sort((a, b) => {
+      const pa = a.status === 'pending' ? 0 : 1;
+      const pb = b.status === 'pending' ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+  }, [items, q, quickFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  const patch = async (id, body) => {
+    const r = await fetch(`/api/reservations/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-admin-password': token },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('Falha ao atualizar');
+    return r.json();
+  };
+
+  const changeStatus = async (reservation, status) => {
+    const prev = items;
+    const optimistic = items.map((it) => (it.id === reservation.id ? { ...it, status } : it));
+    globalMutate(RESERVATIONS_KEY, { items: optimistic }, false);
+    setSelected((s) => (s && s.id === reservation.id ? { ...s, status } : s));
+    try {
+      await patch(reservation.id, { status });
+      toast.success(`Status atualizado para ${STATUS[status]?.label}.`);
+      mutate();
+    } catch {
+      globalMutate(RESERVATIONS_KEY, { items: prev }, false);
+      toast.error('Não foi possível atualizar o status.');
+    }
+  };
+
+  const markSeen = async (reservation) => {
+    if (reservation.seen === false) {
+      const optimistic = items.map((it) => (it.id === reservation.id ? { ...it, seen: true } : it));
+      globalMutate(RESERVATIONS_KEY, { items: optimistic }, false);
+      try { await patch(reservation.id, { seen: true }); mutate(); } catch {}
+    }
+  };
+
+  const openDetails = (reservation) => {
+    setSelected(reservation);
+    markSeen(reservation);
+  };
+
+  const removeReservation = async (reservation) => {
+    if (!confirm(`Excluir a reserva de ${reservation.name || 'este cliente'}? Essa ação não pode ser desfeita.`)) return;
+    const prev = items;
+    const optimistic = items.filter((it) => it.id !== reservation.id);
+    globalMutate(RESERVATIONS_KEY, { items: optimistic }, false);
+    setSelected(null);
+    try {
+      const r = await fetch(`/api/reservations/${reservation.id}`, {
+        method: 'DELETE',
+        headers: { 'x-admin-password': token },
+      });
+      if (!r.ok) throw new Error();
+      toast.success('Reserva excluída.');
+      mutate();
+    } catch {
+      globalMutate(RESERVATIONS_KEY, { items: prev }, false);
+      toast.error('Não foi possível excluir a reserva.');
+    }
+  };
+
+  return (
+    <div>
+      {/* Cards de indicadores */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
+        <StatCard icon={Calendar} label="Hoje" value={stats.today} accent="bg-gold/15 text-gold" />
+        <StatCard icon={CalendarRange} label="Esta semana" value={stats.week} accent="bg-gold/15 text-gold" />
+        <StatCard icon={AlertCircle} label="Pendentes" value={stats.pending} accent="bg-amber-400/15 text-amber-400" />
+        <StatCard icon={Sparkles} label="Confirmadas" value={stats.confirmed} accent="bg-emerald-400/15 text-emerald-400" />
+        <StatCard icon={CalendarDays} label="Total do mês" value={stats.month} accent="bg-sky-400/15 text-sky-400" />
+        <StatCard icon={BarChart3} label="Total geral" value={stats.total} accent="bg-white/10 text-white" />
+      </div>
+
+      {/* Busca + filtros rápidos */}
+      <div className="flex flex-col gap-3 mb-6">
+        <div className="relative max-w-md">
+          <Search className="w-4 h-4 text-gold absolute left-4 top-1/2 -translate-y-1/2" />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Buscar por nome, telefone ou e-mail..."
+            className="w-full pl-11 pr-4 py-2.5 rounded-full glass text-white text-sm placeholder-white/40 focus:outline-none"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {QUICK_FILTERS.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => setQuickFilter(f.id)}
+              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                quickFilter === f.id ? 'btn-gold text-black' : 'glass text-white/70 hover:text-gold'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+          <span className="ml-auto text-white/40 text-xs self-center hidden sm:inline">{filtered.length} reserva(s)</span>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-3">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="h-20 rounded-xl glass animate-pulse" />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-20 text-white/50">
+          <Calendar className="w-10 h-10 mx-auto mb-3 text-gold/40" />
+          <p>Nenhuma reserva encontrada.</p>
+        </div>
+      ) : (
+        <>
+          {/* Tabela — desktop */}
+          <div className="hidden md:block rounded-2xl overflow-hidden glass">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-gold/80 border-b border-white/10">
+                  <th className="px-4 py-3 font-semibold">Cliente</th>
+                  <th className="px-4 py-3 font-semibold">Contato</th>
+                  <th className="px-4 py-3 font-semibold">Data / Horário</th>
+                  <th className="px-4 py-3 font-semibold">Pessoas</th>
+                  <th className="px-4 py-3 font-semibold">Status</th>
+                  <th className="px-4 py-3 font-semibold">Criado em</th>
+                  <th className="px-4 py-3 font-semibold text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                <AnimatePresence>
+                  {pageItems.map((r) => {
+                    const isNew = r.seen === false;
+                    return (
+                      <motion.tr
+                        key={r.id}
+                        layout
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        onClick={() => openDetails(r)}
+                        className={`border-b border-white/5 last:border-0 cursor-pointer hover:bg-white/5 transition-colors ${isNew ? 'bg-gold/5' : ''}`}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            {isNew && <NewBadgeDot />}
+                            <span className="text-white font-medium">{r.name || 'Sem nome'}</span>
+                          </div>
+                          {r.message && <div className="text-white/40 text-xs mt-0.5 max-w-[220px] truncate">{r.message}</div>}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="text-white/70 text-xs">{r.phone || '—'}</div>
+                          <div className="text-white/40 text-xs truncate max-w-[160px]">{r.email || '—'}</div>
+                        </td>
+                        <td className="px-4 py-3 text-white/80 text-xs whitespace-nowrap">
+                          {fmtDate(r.date)} · {r.time || '—'}
+                        </td>
+                        <td className="px-4 py-3 text-white/80 text-xs">{r.guests || 1}</td>
+                        <td className="px-4 py-3"><StatusSelect value={r.status} onChange={(v) => changeStatus(r, v)} compact /></td>
+                        <td className="px-4 py-3 text-white/40 text-xs whitespace-nowrap">{fmtCreatedAt(r.createdAt)}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                            <a href={whatsHref(r.phone)} target="_blank" rel="noreferrer" title="WhatsApp" className="w-8 h-8 rounded-lg glass flex items-center justify-center hover:bg-[#25D366]/10">
+                              <MessageCircle className="w-3.5 h-3.5 text-[#25D366]" />
+                            </a>
+                            <button onClick={() => openDetails(r)} title="Ver detalhes" className="w-8 h-8 rounded-lg glass flex items-center justify-center hover:bg-gold/10">
+                              <Eye className="w-3.5 h-3.5 text-gold" />
+                            </button>
+                            <button onClick={() => removeReservation(r)} title="Excluir" className="w-8 h-8 rounded-lg glass flex items-center justify-center hover:bg-red-500/10">
+                              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                            </button>
+                          </div>
+                        </td>
+                      </motion.tr>
+                    );
+                  })}
+                </AnimatePresence>
+              </tbody>
+            </table>
+          </div>
+
+          {/* Cards — mobile */}
+          <div className="md:hidden space-y-3">
+            <AnimatePresence>
+              {pageItems.map((r) => {
+                const isNew = r.seen === false;
+                const s = STATUS[r.status] || STATUS.pending;
+                return (
+                  <motion.div
+                    key={r.id}
+                    layout
+                    initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                    onClick={() => openDetails(r)}
+                    className={`glass rounded-xl p-4 ${isNew ? 'ring-1 ring-gold/50' : ''}`}
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        {isNew && <NewBadgeDot />}
+                        <span className="text-white font-semibold text-sm">{r.name || 'Sem nome'}</span>
+                      </div>
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.bg} ${s.text}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} /> {s.label}
+                      </span>
+                    </div>
+                    <div className="text-white/60 text-xs mb-1">{fmtDate(r.date)} · {r.time || '—'} · {r.guests || 1} pessoa(s)</div>
+                    <div className="text-white/40 text-xs mb-3">{r.phone || '—'}</div>
+                    <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                      <a href={telHref(r.phone)} className="flex-1 py-2 rounded-lg glass flex items-center justify-center gap-1.5 text-white/70 text-xs">
+                        <Phone className="w-3.5 h-3.5 text-gold" /> Ligar
+                      </a>
+                      <a href={whatsHref(r.phone)} target="_blank" rel="noreferrer" className="flex-1 py-2 rounded-lg glass flex items-center justify-center gap-1.5 text-white/70 text-xs">
+                        <MessageCircle className="w-3.5 h-3.5 text-[#25D366]" /> WhatsApp
+                      </a>
+                      <button onClick={() => removeReservation(r)} className="py-2 px-3 rounded-lg glass flex items-center justify-center text-red-400">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </AnimatePresence>
+          </div>
+
+          {/* Paginação */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 mt-6">
+              <button
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                className="w-9 h-9 rounded-full glass flex items-center justify-center disabled:opacity-30"
+              >
+                <ChevronLeft className="w-4 h-4 text-gold" />
+              </button>
+              <span className="text-white/60 text-sm">Página {page} de {totalPages}</span>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                className="w-9 h-9 rounded-full glass flex items-center justify-center disabled:opacity-30"
+              >
+                <ChevronRight className="w-4 h-4 text-gold" />
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      <ReservationDrawer
+        reservation={selected}
+        onClose={() => setSelected(null)}
+        onStatusChange={changeStatus}
+        onDelete={removeReservation}
+      />
+    </div>
+  );
+}
